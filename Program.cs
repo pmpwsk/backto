@@ -122,7 +122,9 @@ DirectoryBackupResult Backup(string source, string target, StateTree state)
     foreach (var kv in state.Directories)
     {
         SetCurrentPath(source + '/' + kv.Key);
-        if (!Directory.Exists(source + '/' + kv.Key))
+        if (Directory.Exists(source + '/' + kv.Key))
+            anySucceeded = true;
+        else if (new DirectoryInfo(target + '/' + kv.Key).LinkTarget == null)
             switch (DeleteAndCount(target + '/' + kv.Key, kv.Value))
             {
                 case DirectoryDeletionResult.Success:
@@ -136,7 +138,13 @@ DirectoryBackupResult Backup(string source, string target, StateTree state)
                     failed.Add(target[Target.Length..] + '/' + kv.Key);
                     break;
             }
-        else anySucceeded = true;
+        else
+        {
+            Deleted++;
+            Directory.Delete(target + '/' + kv.Key);
+            state.Directories.Remove(kv.Key);
+            anySucceeded = true;
+        }
     }
 
     //remove deleted files
@@ -161,31 +169,71 @@ DirectoryBackupResult Backup(string source, string target, StateTree state)
     DirectoryInfo sourceInfo = new(source);
 
     //add/update directories
-    foreach (var directory in sourceInfo.GetDirectories().Where(x => x.LinkTarget == null).Select(x => x.Name))
+    foreach (var directoryInfo in sourceInfo.GetDirectories())
     {
+        var directory = directoryInfo.Name;
         SetCurrentPath(source + '/' + directory);
         try
         {
-            if (!state.Directories.TryGetValue(directory, out var subState))
+            if (directoryInfo.LinkTarget == null)
             {
-                Created++;
-                Directory.CreateDirectory(target + '/' + directory);
-                subState = new();
-                state.Directories[directory] = subState;
+                if (!state.Directories.TryGetValue(directory, out var subState))
+                {
+                    Created++;
+                    Directory.CreateDirectory(target + '/' + directory);
+                    subState = new();
+                    state.Directories[directory] = subState;
+                }
+                else if (new DirectoryInfo(target + '/' + directory).LinkTarget != null)
+                {
+                    Changed++;
+                    Directory.Delete(target + '/' + directory);
+                    Directory.CreateDirectory(target + '/' + directory);
+                    subState = new();
+                    state.Directories[directory] = subState;
+                }
+                
                 anySucceeded = true;
-            }
-            else anySucceeded = true;
 
-            switch (Backup(source + '/' + directory, target + '/' + directory, subState))
+                switch (Backup(source + '/' + directory, target + '/' + directory, subState))
+                {
+                    case DirectoryBackupResult.Success:
+                    case DirectoryBackupResult.SomeFailed:
+                        anySucceeded = true;
+                        break;
+                    case DirectoryBackupResult.AllFailed:
+                        failed.Add(target[Target.Length..] + '/' + directory);
+                        break;
+                    //no action for NoAction
+                }
+            }
+            else
             {
-                case DirectoryBackupResult.Success:
-                case DirectoryBackupResult.SomeFailed:
+                if (!state.Directories.TryGetValue(directory, out var subState))
+                {
+                    Created++;
+                    LinkDirectory(target + '/' + directory, directoryInfo.LinkTarget);
+                    state.Directories[directory] = new();
                     anySucceeded = true;
-                    break;
-                case DirectoryBackupResult.AllFailed:
-                    failed.Add(target[Target.Length..] + '/' + directory);
-                    break;
-                //no action for NoAction
+                }
+                else
+                {
+                    var otherTarget = new DirectoryInfo(target + '/' + directory).LinkTarget;
+                    if (otherTarget == null)
+                    {
+                        Changed++;
+                        Directory.Delete(target + '/' + directory, true);
+                        LinkDirectory(target + '/' + directory, directoryInfo.LinkTarget);
+                        state.Directories[directory] = new();
+                        anySucceeded = true;
+                    }
+                    else if (otherTarget != directoryInfo.LinkTarget)
+                    {
+                        Changed++;
+                        LinkDirectory(target + '/' + directory, directoryInfo.LinkTarget);
+                        anySucceeded = true;
+                    }
+                }
             }
         }
         catch
@@ -195,26 +243,27 @@ DirectoryBackupResult Backup(string source, string target, StateTree state)
     }
 
     //add/update files
-    foreach (var file in sourceInfo.GetFiles().Where(x => x.LinkTarget == null).Select(x => x.Name))
+    foreach (var fileInfo in sourceInfo.GetFiles())
     {
+        var file = fileInfo.Name;
         SetCurrentPath(source + '/' + file);
         try
         {
             string timestamp = File.GetLastWriteTimeUtc(source + '/' + file).Ticks.ToString();
             if (!state.Files.TryGetValue(file, out var savedTimestamp))
-            {
                 Created++;
-                File.Copy(source + '/' + file, target + '/' + file, true);
-                state.Files[file] = timestamp;
-                anySucceeded = true;
-            }
             else if (savedTimestamp != timestamp)
-            {
                 Changed++;
+            else
+                continue;
+                
+            if (fileInfo.LinkTarget == null)
                 File.Copy(source + '/' + file, target + '/' + file, true);
-                state.Files[file] = timestamp;
-                anySucceeded = true;
-            }
+            else
+                LinkFile(target + '/' + file, fileInfo.LinkTarget);
+            
+            state.Files[file] = timestamp;
+            anySucceeded = true;
         }
         catch
         {
@@ -357,6 +406,20 @@ DirectoryDeletionResult DeleteAndCount(string path, StateTree tree)
         return DirectoryDeletionResult.SomeFailed;
     }
     return DirectoryDeletionResult.AllFailed;
+}
+
+static void LinkFile(string path, string linkTarget)
+{
+    if (File.Exists(path))
+        File.Delete(path);
+    File.CreateSymbolicLink(path, linkTarget);
+}
+
+static void LinkDirectory(string path, string linkTarget)
+{
+    if (Directory.Exists(path))
+        Directory.Delete(path);
+    Directory.CreateSymbolicLink(path, linkTarget);
 }
 
 static string VersionString(Assembly assembly)
