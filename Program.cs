@@ -258,7 +258,11 @@ DirectoryBackupResult Backup(string source, string target, StateTree state)
                 continue;
                 
             if (fileInfo.LinkTarget == null)
-                File.Copy(source + '/' + file, target + '/' + file, true);
+            {
+                if (File.Exists(target + '/' + file))
+                    File.Delete(target + '/' + file);
+                File.Copy(source + '/' + file, target + '/' + file);
+            }
             else
                 LinkFile(target + '/' + file, fileInfo.LinkTarget);
             
