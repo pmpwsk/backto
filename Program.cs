@@ -156,7 +156,7 @@ DirectoryBackupResult Backup(string source, string target, StateTree state)
             {
                 Deleted++;
                 File.Delete(target + '/' + kv.Key);
-                state.Directories.Remove(kv.Key);
+                state.Files.Remove(kv.Key);
                 anySucceeded = true;
             }
             catch
